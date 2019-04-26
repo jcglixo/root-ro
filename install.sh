@@ -5,24 +5,22 @@ set -e
 
 # Make sure script is run as root.
 if [ "$(id -u)" != "0" ]; then
-  echo "Must be run as root with sudo! Try: sudo ./install.sh"
+  echo "Must be run as root with sudo! Try: sudo ./install.sh" v
   exit 1
 fi
 
 echo Creating initramfs...
-mkinitramfs -o /boot/init.gz
+mkinitramfs -o /boot/init-root-ro.gz
 
 if ! grep -q "^initramfs " /boot/config.txt; then
-  echo Adding \"initramfs init.gz\" to /boot/config.txt
-  echo initramfs init.gz >> /boot/config.txt
+  echo Adding \"initramfs init-root-ro.gz\" to /boot/config.txt
+  echo initramfs init-root-ro.gz >> /boot/config.txt
 fi
 
 if ! grep -q "^overlay" /etc/initramfs-tools/modules; then
   echo Adding \"overlay\" to /etc/initramfs-tools/modules
   echo overlay >> /etc/initramfs-tools/modules
 fi
-
-
 
 echo Disabling swap, we dont want swap files in a read-only root filesystem...
 dphys-swapfile swapoff
@@ -46,12 +44,12 @@ chmod +x /etc/initramfs-tools/scripts/init-bottom/root-ro
 
 echo Updating initramfs...
 update-initramfs -u
-mkinitramfs -o /boot/init.gz
+mkinitramfs -o /boot/init-root-ro.gz
 
 if ! grep -q "root-ro-driver=overlay" /boot/cmdline.txt; then
   echo Adding root-ro-driver parameter to /boot/cmdline.txt
   sed -i "1 s|$| root-ro-driver=overlay|" /boot/cmdline.txt
 fi
 
-echo Restarting RPI
+echo Restarting RPI...
 reboot

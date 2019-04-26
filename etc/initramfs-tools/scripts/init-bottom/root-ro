@@ -1,14 +1,15 @@
 #!/bin/sh
 #
-#  Read-only Root-FS for Raspian Stretch
+#  Read-only Root/Boot-FS for Raspian Stretch
 #
-#  Modified 2019 by Jasper Ennik to work with Raspain Stretch
+#  Modified 2019 by Jose Gama to set /boot read-only as well
 #
 #  Based on scripts from
-#    Sebastian P., Nicholas A., Axel Heider, Pascal Rosin
+#    Sebastian P., Nicholas A., Axel Heider, Pascal Rosin, Jasper Ennik
 #  And sources found at
 #    Niun: https://gist.github.com/niun/34c945d70753fc9e2cc7
 #    Josep Sanz: https://github.com/josepsanzcamp/root-ro
+#    Jasper Ennik: https://github.com/JasperE84/root-ro
 #
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -42,6 +43,9 @@
 #   - Mods to make it work with Raspian stretch and some console scripts to reboot
 #     to readonly/write mode.
 #
+# v4.0.0
+#   - Set /boot as read-only as well
+#
 # Notes:
 #   * no changes to the root fs are made by this script.
 #   * if /home/[user] is on the RO root fs, files are in ram and not saved.
@@ -50,14 +54,16 @@
 #  put this file in /etc/initramfs-tools/scripts/init-bottom/root-ro
 #  chmod 0755 /etc/initramfs-tools/scripts/init-bottom/root-ro
 #  update-initramfs -u
-#  mkinitramfs -o /boot/init.gz
-#  echo initramfs init.gz >> /boot/config.txt
+#  mkinitramfs -o /boot/init-root-ro.gz
+#  echo initramfs init-root-ro.gz >> /boot/config.txt
 #  echo overlay >> /etc/initramfs-tools/modules
 #  add `root-ro-driver=overlay` to the line in /boot/cmdline.txt
 #
 # Disable read-only root fs
 #   * option 1: kernel boot parameter "disable-root-ro=true"
 #   * option 2: create file "/disable-root-ro"
+#   * option 3: comment line "initramfs init-root-ro.gz" in /boot/config.txt
+#               (will completely disable initramfs usage during boot)
 #
 # ROOT_RO_DRIVER variable controls which driver isused for the ro/rw layering
 #   Supported drivers are: overlayfs, aufs
@@ -135,7 +141,6 @@ case ${ROOT_RO_DRIVER} in
         ;;
 esac
 
-
 # check if kernel module exists
 modprobe -qb ${ROOT_RO_DRIVER}
 if [ $? -ne 0 ]; then
@@ -164,7 +169,6 @@ if [ $? -ne 0 ]; then
     exit 0
 fi
 
-
 # mount a tempfs using the device name tmpfs-root at ${ROOT_RW}
 mount -t tmpfs tmpfs-root ${ROOT_RW}
 if [ $? -ne 0 ]; then
@@ -185,9 +189,7 @@ if [ "${ROOT_RO_DRIVER}" = "overlay" ]; then
         log_failure_msg "${MYTAG} ERROR 6.2: failed to create ${ROOT_RW_WORK}"
         exit 0
     fi
-
 fi
-
 
 # root is mounted on ${rootmnt}, move it to ${ROOT_RO}.
 mount -o move ${rootmnt} ${ROOT_RO}
@@ -252,25 +254,37 @@ fi
 # Let's deal with /etc/fstab first. It usually contains an entry for the root
 # fs, which is no longer valid now. We have to remove it and add our new
 # ${ROOT_RO} entry.
+# Additionally, in order to mount /boot as read-only, we need to add the 'ro'
+# option (note: even if 'rw' is already there, the rightmost option will prevail).
 # Remember we are still on the initramfs root fs here, so we have to work on
 # ${rootmnt}/etc/fstab. The original fstab is ${rootmnt}${ROOT_RO}/etc/fstab.
 ROOT_TYPE=$(cat /proc/mounts | ${rootmnt}/bin/grep ${ROOT} | ${rootmnt}/usr/bin/cut -d' ' -f3)
 ROOT_OPTIONS=$(cat /proc/mounts | ${rootmnt}/bin/grep ${ROOT} | ${rootmnt}/usr/bin/cut -d' ' -f4)
+FSTAB_BT=$(cat ${rootmnt}${ROOT_RO}/etc/fstab | ${rootmnt}/bin/grep -v '^[[:space:]]*#' | ${rootmnt}/bin/grep '[[:space:]]/boot[[:space:]]' | ${rootmnt}/usr/bin/tr -s '[:space:]' ' ')
+BT_FS=$(echo "${FSTAB_BT}" | ${rootmnt}/usr/bin/cut -d' ' -f1)
+BT_TYPE=$(echo "${FSTAB_BT}" | ${rootmnt}/usr/bin/cut -d' ' -f3)
+BT_OPTIONS=$(echo "${FSTAB_BT}" | ${rootmnt}/usr/bin/cut -d' ' -f4)
+if [ "${BT_FS}" = "" ]; then
+    BT_FS="#<no boot line in original fstab>"
+fi
 cat <<EOF >${rootmnt}/etc/fstab
 #
 #  This fstab is in RAM, the real one can be found at ${ROOT_RO}/etc/fstab
-#  The original entry for '/' and all swap files have been removed.  The new
-#  entry for the read-only the real root fs follows. Write access can be
-#  enabled using:
+#  The original entries for '/', '/boot' and all swap files have been removed.
+#  The new entries for the read-only real root/boot fs follows. Write access
+#  can be enabled using:
 #    sudo mount -o remount,rw ${ROOT_RO}
+#    sudo mount -o remount,rw /boot
 #  re-mounting it read-only is done using:
 #    sudo mount -o remount,ro ${ROOT_RO}
+#    sudo mount -o remount,ro /boot
 #
 
 ${ROOT} ${ROOT_RO} ${ROOT_TYPE} ${ROOT_OPTIONS} 0 0
+${BT_FS} /boot ${BT_TYPE} ${BT_OPTIONS},ro 0 0
 
 #
-#  remaining entries from the original ${ROOT_RO}/etc/fstab follow.
+#  remaining entries from the original ${ROOT_RO}/etc/fstab follow
 #
 EOF
 if [ $? -ne 0 ]; then
@@ -278,8 +292,8 @@ if [ $? -ne 0 ]; then
     #exit 0
 fi
 
-#remove root entry and swap from fstab
-cat ${rootmnt}${ROOT_RO}/etc/fstab | ${rootmnt}/bin/grep -v ' / ' | ${rootmnt}/bin/grep -v swap >>${rootmnt}/etc/fstab
+#remove root, boot and swap entries from fstab
+cat ${rootmnt}${ROOT_RO}/etc/fstab | ${rootmnt}/bin/grep -v '[[:space:]]/[[:space:]]' | ${rootmnt}/bin/grep -v '[[:space:]]/boot[[:space:]]'  | ${rootmnt}/bin/grep -v swap >>${rootmnt}/etc/fstab
 if [ $? -ne 0 ]; then
     log_failure_msg "${MYTAG} ERROR 12: failed to modify etc/fstab (step 2)"
     #exit 0
